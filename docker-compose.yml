@@ -1,0 +1,13 @@
+version: "3.7"
+services:
+  s3vol:
+    build: .
+    image: s3vol
+    container_name: s3vol
+    volumes:
+      - ./test-vol:/data
+    environment:
+      - AWS_ACCESS_KEY_ID=MY_AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY=MY_AWS_SECRET_ACCESS_KEY
+      - AWS_REGION=eu-central-1
+      - REMOTE=s3://docker-s3-volume/test

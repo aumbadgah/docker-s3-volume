@@ -1,0 +1,136 @@
+#!/bin/bash
+
+[[ "$TRACE" ]] && set -x
+
+function usage {
+cat <<-EOF
+	Usage: $PROGNAME [OPTIONS] <local-path> <remote-path>
+	Sync directory between local and s3.
+
+    -h / --help           view this help
+	  -f / --force-restore  restore from s3 to local even if local directory is not empty.
+                          has no effect if `--push-only` option is set
+	  --push-only           do not restore files from s3 to local
+	  --clean-local         removes local files after they have been copied to s3.
+                          can only be set with `--push-only` option
+
+	  eg: $PROGNAME /data s3://bucket/dir
+EOF
+  exit 0
+}
+
+function log {
+  TIMESTAMP=`date "+%Y-%m-%d %H:%M:%S"`
+  echo "$TIMESTAMP :: $1"
+}
+
+function error_exit {
+  log "${1:-"Unknown Error"}" 1>&2
+  exit 1
+}
+
+SHORT=hfpc
+LONG=help,force-restore,push-only,clean-local
+
+PARSED_OPTIONS=$(getopt -n "$0" -o $SHORT --long $LONG -- "$@")
+if [ $? -ne 0 ]; then
+  exit 1
+fi
+eval set -- "$PARSED_OPTIONS"
+
+while true; do
+  case "$1" in
+    -h|--help)
+      usage
+      shift;;
+
+    -f|--force-restore)
+      FORCE_RESTORE="true"
+      shift;;
+
+    -p|--push-only)
+      PUSH_ONLY="true"
+      shift;;
+
+    --)
+      shift
+      break;;
+  esac
+done
+
+PROGNAME=$0
+LOCAL=${LOCAL:-"/data"}
+LOCAL=${1:-$LOCAL}
+REMOTE=${2:-$REMOTE}
+
+SYNC_INTERVAL=${SYNC_INTERVAL:-42}
+FORCE_RESTORE=${FORCE_RESTORE:-false}
+PUSH_ONLY=${PUSH_ONLY:-false}
+
+if [ "$ENDPOINT_URL" ]; then
+  AWS="aws --endpoint-url $ENDPOINT_URL"
+else
+  AWS=aws
+fi
+
+function restore {
+  if [[ $PUSH_ONLY == 'false' ]]; then
+    log "restore $REMOTE => $LOCAL"
+    if ! $AWS s3 sync "$REMOTE" "$LOCAL"; then
+      log "restore failed" 1>&2
+      return 1
+    fi
+  fi
+}
+
+function backup {
+  push_args="--delete"
+
+  if [[ $PUSH_ONLY == 'true' ]]; then
+    push_args=""
+  fi
+
+  log "backup $LOCAL => $REMOTE"
+  if ! $AWS s3 sync "$LOCAL" "$REMOTE" "$push_args"; then
+    log "backup failed" 1>&2
+    return 1
+  fi
+}
+
+function final_backup {
+  while ! backup; do
+    log "backup failed, will retry..." 1>&2
+    sleep 1
+  done
+  exit 0
+}
+
+function cycle {
+  backup && restore
+}
+
+function idle {
+  log "ready"
+  while true; do
+    sleep $SYNC_INTERVAL &
+    wait $!
+    cycle
+  done
+}
+
+function init {
+  if [[ $PUSH_ONLY == 'false' ]] && [ "$(ls -A $LOCAL)" ]; then
+    if [[ $FORCE_RESTORE == 'false' ]]; then
+      error_exit "local directory is not empty"
+    fi
+  fi
+}
+
+init
+restore
+backup
+
+trap final_backup SIGHUP SIGINT SIGTERM
+trap "backup; idle" USR1
+
+idle
